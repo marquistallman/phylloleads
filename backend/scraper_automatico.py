@@ -339,16 +339,28 @@ class AutomaticDataScraper:
                 results['phone'] = phone
                 logger.info(f"      -> Teléfono: {results['phone']}")
             
-            # Buscar dirección: primero por selector, luego por palabras clave
+            # Buscar dirección: primero por selectores de Maps, luego por texto
             address = None
-            address_elem = soup.find('div', {'data-attrid': 'address'})
-            if address_elem:
-                address = address_elem.get_text(strip=True)
+            address_selectors = [
+                'button[data-item-id="address"]',
+                'div[data-item-id="address"]',
+                'a[data-item-id="address"]',
+                'button[aria-label*="Address"]',
+                'div[aria-label*="Address"]',
+                'button[aria-label*="Dirección"]',
+                'div[aria-label*="Dirección"]',
+            ]
+            for selector in address_selectors:
+                address_elem = soup.select_one(selector)
+                if address_elem:
+                    address = address_elem.get_text(" ", strip=True) or address_elem.get('aria-label', '').strip()
+                    if address:
+                        break
             
             if not address:
                 for line in page_text.split('\n'):
                     line = line.strip()
-                    if any(word in line.lower() for word in ['calle', 'carrera', 'avenida', 'av.', 'cra.', 'cll.', 'diag']):
+                    if any(word in line.lower() for word in ['calle', 'carrera', 'avenida', 'av.', 'cra.', 'cll.', 'cl.', 'diag', 'transversal', '#']):
                         if 10 < len(line) < 100:
                             address = line
                             break
@@ -375,6 +387,18 @@ class AutomaticDataScraper:
         except Exception as e:
             logger.warning(f"   Error Google Maps: {str(e)[:50]}")
             return None
+
+    def _extract_address_from_text(self, text: str) -> Optional[str]:
+        """Intenta identificar una dirección colombiana desde texto libre."""
+        if not text:
+            return None
+
+        address_keywords = ['calle', 'carrera', 'avenida', 'av.', 'cra.', 'cl.', 'cll.', 'diagonal', 'diag.', 'transversal', 'km ', '#']
+        for raw_line in text.split('\n'):
+            line = raw_line.strip()
+            if 10 <= len(line) <= 120 and any(keyword in line.lower() for keyword in address_keywords):
+                return line
+        return None
     
     def scrape_company(self, company_id: int, company_name: str, city: str) -> Optional[Dict[str, Any]]:
         """Extrae datos de una empresa buscando en múltiples fuentes"""
@@ -428,36 +452,39 @@ class AutomaticDataScraper:
     def get_pending_companies(self, limit: int = 50) -> List:
         """Obtiene empresas sin detalles"""
         try:
-            cursor = self.conn.cursor()
-            
-            # Query para PostgreSQL y SQLite es similar
-            query = """
-                SELECT c.id, c.name, c.city, c.nit
-                FROM companies c
-                LEFT JOIN company_details cd ON c.id = cd.company_id
-                WHERE c.is_active = true
-                AND (cd.id IS NULL 
-                     OR cd.phone = 'N/A' 
-                     OR cd.phone IS NULL)
-                ORDER BY c.name
-                LIMIT %s
-            """ if isinstance(self.conn, type(None)) or (hasattr(self.conn, 'driver_version')) else """
-                SELECT c.id, c.name, c.city, c.nit
-                FROM companies c
-                LEFT JOIN company_details cd ON c.id = cd.company_id
-                WHERE c.is_active = 1
-                AND (cd.id IS NULL 
-                     OR cd.phone = 'N/A' 
-                     OR cd.phone IS NULL)
-                ORDER BY c.name
-                LIMIT ?
-            """
-            
-            # Usar placeholder correcto según la BD
-            if psycopg2 and isinstance(self.conn, psycopg2.extensions.connection):
+            # Crear cursor: usar RealDictCursor en psycopg2 para obtener diccionarios
+            if psycopg2 is not None and isinstance(self.conn, psycopg2.extensions.connection) and RealDictCursor is not None:
+                cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+            else:
+                cursor = self.conn.cursor()
+
+            # Query para PostgreSQL y SQLite (usar placeholders adecuados)
+            if psycopg2 is not None and isinstance(self.conn, psycopg2.extensions.connection):
+                query = """
+                    SELECT c.id, c.name, c.city, c.nit
+                    FROM companies c
+                    LEFT JOIN company_details cd ON c.id = cd.company_id
+                    WHERE c.is_active = true
+                    AND (cd.id IS NULL 
+                         OR cd.phone = 'N/A' 
+                         OR cd.phone IS NULL)
+                    ORDER BY c.name
+                    LIMIT %s
+                """
                 cursor.execute(query, (limit,))
             else:
-                cursor.execute(query.replace('%s', '?'), (limit,))
+                query = """
+                    SELECT c.id, c.name, c.city, c.nit
+                    FROM companies c
+                    LEFT JOIN company_details cd ON c.id = cd.company_id
+                    WHERE c.is_active = 1
+                    AND (cd.id IS NULL 
+                         OR cd.phone = 'N/A' 
+                         OR cd.phone IS NULL)
+                    ORDER BY c.name
+                    LIMIT ?
+                """
+                cursor.execute(query, (limit,))
             
             results = cursor.fetchall()
             logger.info(f"Encontradas {len(results)} empresas para procesar")
@@ -590,7 +617,7 @@ def main():
     print("="*80)
     
     # Configurar BD desde variables de entorno
-    db_type = "postgres" if os.getenv("DB_HOST") else "sqlite"
+    db_type = "postgres" if psycopg2 is not None else "sqlite"
     db_host = os.getenv("DB_HOST", "localhost")
     db_port = int(os.getenv("DB_PORT", "5432"))
     db_name = os.getenv("DB_NAME", "appdb")

@@ -1,72 +1,14 @@
 [
   {
-    "id": 6,
-    "nombre": "CENTRO VETERINARIO ESPECIALIZADO BOGOTÁ",
-    "nit": "850567890",
-    "ciudad": "bogota",
+    "id": 67,
+    "nombre": "\"ESENCIA\" RESTAURANTE - GASTRO BAR S.A.S.",
+    "nit": null,
+    "ciudad": "tunja",
     "estado": "Activa",
-    "tamaño": "Grande",
+    "tamaño": "No especificado",
     "contacto": {
-      "telefono": "(601) 7423686",
+      "telefono": "3214920490",
       "website": null,
       "direccion": null
     },
-    "actualizado": "2026-05-10T09:21:02.406490"
-  },
-  {
-    "id": 3,
-    "nombre": "CLÍNICA VETERINARIA MONTE VERDE S.A.",
-    "nit": "900234567",
-    "ciudad": "medellin",
-    "estado": "Activa",
-    "tamaño": "Mediana",
-    "contacto": {
-      "telefono": "301 5052787",
-      "website": null,
-      "direccion": null
-    },
-    "actualizado": "2026-05-10T09:21:10.903092"
-  },
-  {
-    "id": 1,
-    "nombre": "JAH PET CLINICA VETERINARIA S.A.S.",
-    "nit": "901531076",
-    "ciudad": "cartagena",
-    "estado": "Activa",
-    "tamaño": "Pequeña",
-    "contacto": {
-      "telefono": "324 6463853",
-      "website": null,
-      "direccion": null
-    },
-    "actualizado": "2026-05-10T09:21:19.384564"
-  },
-  {
-    "id": 5,
-    "nombre": "VET CLINIC BARRANQUILLA DOGS & CATS",
-    "nit": "800456789",
-    "ciudad": "barranquilla",
-    "estado": "Activa",
-    "tamaño": "Pequeña",
-    "contacto": {
-      "telefono": "316 4539854",
-      "website": null,
-      "direccion": null
-    },
-    "actualizado": "2026-05-10T09:21:27.867174"
-  },
-  {
-    "id": 2,
-    "nombre": "VETERINARIA EL PARAÍSO LIMITADA",
-    "nit": "800123456",
-    "ciudad": "bogota",
-    "estado": "Activa",
-    "tamaño": "Mediana",
-    "contacto": {
-      "telefono": "315 4866362",
-      "website": null,
-      "direccion": null
-    },
-    "actualizado": "2026-05-10T09:21:36.336970"
-  }
-]
+    "actualizado": 

@@ -70,6 +70,11 @@ def get_scraper():
         headless=True
     )
 
+
+def get_db_connection():
+    """Obtiene la conexión a la misma BD que usa el scraper principal."""
+    return get_scraper().get_db_connection()
+
 # Health check
 @app.get("/health", tags=["Health"])
 async def health_check():
@@ -250,14 +255,15 @@ async def get_companies_with_details(niche: str = "veterinarias"):
         Lista de empresas con detalles completos
     """
     try:
-        import sqlite3
-        
-        conn = sqlite3.connect("appdb.sqlite")
-        conn.row_factory = sqlite3.Row
+        conn = get_db_connection()
         cursor = conn.cursor()
+
+        is_sqlite = isinstance(conn, sqlite3.Connection)
+        placeholder = "?" if is_sqlite else "%s"
+        active_filter = "c.is_active = 1" if is_sqlite else "c.is_active IS TRUE"
         
         # Query: Obtener empresas CON sus detalles
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT 
                 c.id,
                 c.name,
@@ -272,9 +278,12 @@ async def get_companies_with_details(niche: str = "veterinarias"):
                 cd.scraped_at
             FROM companies c
             LEFT JOIN company_details cd ON c.id = cd.company_id
-            WHERE c.search_niche = ? AND c.is_active = 1
+                        WHERE c.search_niche = {placeholder}
+                            AND {active_filter}
+                            AND c.name IS NOT NULL
+                            AND c.name != 'N/A'
             ORDER BY c.name
-        """, (niche,))
+                """, (niche,))
         
         companies = []
         for row in cursor.fetchall():
@@ -322,10 +331,7 @@ async def get_company_details(company_id: int):
         Detalles completos: teléfono, website, dirección, etc.
     """
     try:
-        import sqlite3
-        
-        conn = sqlite3.connect("appdb.sqlite")
-        conn.row_factory = sqlite3.Row
+        conn = get_db_connection()
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -409,7 +415,7 @@ async def enrich_companies_automatic(background_tasks: BackgroundTasks, limit: i
         background_tasks.add_task(run_scraper)
         
         # Obtener estadísticas actuales
-        conn = sqlite3.connect("appdb.sqlite")
+        conn = get_db_connection()
         cursor = conn.cursor()
         
         cursor.execute("SELECT COUNT(*) FROM companies")
@@ -453,7 +459,7 @@ async def scraper_status():
     Muestra estadísticas de enriquecimiento
     """
     try:
-        conn = sqlite3.connect("appdb.sqlite")
+        conn = get_db_connection()
         cursor = conn.cursor()
         
         cursor.execute("SELECT COUNT(*) FROM companies")

@@ -1,5 +1,6 @@
-import requests
 from bs4 import BeautifulSoup
+import re
+from pathlib import Path
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -35,7 +36,7 @@ class EmpresasLaRepublicaScraper:
     """
     
     BASE_URL = "https://empresas.larepublica.co"
-    SEARCH_URL = f"{BASE_URL}/search"
+    SEARCH_URL = f"{BASE_URL}/buscar"
     
     def __init__(
         self,
@@ -64,28 +65,34 @@ class EmpresasLaRepublicaScraper:
         self.db_password = db_password
         self.headless = headless
         self.driver = None
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
+        # Debug HTML saving
+        self.debug_save_html = False
+        self.debug_dir = Path('backend/debug')
+        self._debug_saved_files = []
     
+    
+    def _close_driver(self):
+        """Cierra el driver de Selenium"""
+        if self.driver:
+            self.driver.quit()
+            logger.info("Driver cerrado")
+
     def _init_driver(self):
-        """Inicializa el driver de Selenium (Firefox primero para Docker, luego Chrome/Edge)"""
-        # Intentar Firefox primero (disponible en Docker)
+        """Inicializa el driver de Selenium (Firefox primero, luego Chrome/Edge)"""
+        # Intentar Firefox
         try:
             firefox_options = FirefoxOptions()
             if self.headless:
                 firefox_options.add_argument("--headless")
             firefox_options.add_argument("--no-sandbox")
             firefox_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-            
             self.driver = webdriver.Firefox(options=firefox_options)
             logger.info("Driver de Firefox inicializado")
             return
         except Exception as e:
             logger.debug(f"Firefox no disponible: {e}")
-        
-        # Intentar Chrome (local)
+
+        # Intentar Chrome
         try:
             chrome_options = ChromeOptions()
             if self.headless:
@@ -94,21 +101,19 @@ class EmpresasLaRepublicaScraper:
             chrome_options.add_argument("--disable-dev-shm-usage")
             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
             chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-            
             self.driver = webdriver.Chrome(options=chrome_options)
             logger.info("Driver de Chrome inicializado")
             return
         except Exception as e:
             logger.debug(f"Chrome no disponible: {e}")
-        
-        # Intentar Edge (local)
+
+        # Intentar Edge
         try:
             edge_options = EdgeOptions()
             if self.headless:
                 edge_options.add_argument("--headless")
             edge_options.add_argument("--no-sandbox")
             edge_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-            
             self.driver = webdriver.Edge(options=edge_options)
             logger.info("Driver de Edge inicializado")
             return
@@ -116,66 +121,190 @@ class EmpresasLaRepublicaScraper:
             logger.error(f"No se pudo inicializar ningún navegador: {e}")
             raise Exception("No hay navegador disponible (Firefox, Chrome o Edge)")
     
-    
-    def _close_driver(self):
-        """Cierra el driver de Selenium"""
-        if self.driver:
-            self.driver.quit()
-            logger.info("Driver cerrado")
-    
-    def search_niche(self, niche: str, pages: int = 1) -> List[Dict[str, Any]]:
+    def search_niche(self, niche: str, pages: int = 1, max_load_more: int = 0) -> List[Dict[str, Any]]:
         """
         Busca empresas por nicho y extrae los links de resultados
-        
-        Args:
-            niche: Término de búsqueda (ej: "veterinarias", "restaurantes")
-            pages: Número de páginas a scrapear
-            
-        Returns:
-            Lista de diccionarios con información de empresas
         """
         if not self.driver:
             self._init_driver()
-        
+
+        # Soporte para 'load more' (botón) en lugar de paginación tradicional
         all_companies = []
-        
+        seen_urls = set()
+        initial_pages = 1 if max_load_more > 0 else pages
+
         try:
-            for page in range(1, pages + 1):
+            for page in range(1, initial_pages + 1):
                 logger.info(f"Scrapeando página {page} para nicho: {niche}")
-                
-                # Construir URL con búsqueda
-                url = f"{self.BASE_URL}?q={niche}&page={page}"
-                
+                # Construir URL con búsqueda (sitio usa /buscar?term=...)
+                url = f"{self.SEARCH_URL}?term={niche}&page={page}"
+                logger.debug(f"Cargando URL de búsqueda: {url}")
                 # Cargar página
                 self.driver.get(url)
                 
-                # Esperar a que carguen los resultados
+                # Esperar brevemente a que cargue algo de contenido, pero no romper si timeout
                 try:
-                    WebDriverWait(self.driver, 10).until(
-                        EC.presence_of_all_elements_located((By.CLASS_NAME, "result-item"))
+                    WebDriverWait(self.driver, 5).until(
+                        EC.presence_of_element_located((By.TAG_NAME, "a"))
                     )
-                except:
-                    logger.warning(f"No se encontraron resultados en página {page}")
-                    break
-                
-                # Dar tiempo adicional para scroll y carga
+                except Exception:
+                    logger.debug("No se detectó el elemento esperado antes del timeout; proceder a parsear HTML")
+
+                # Dar tiempo adicional para scroll y carga dinámica
                 time.sleep(2)
-                
+
                 # Parsear HTML
                 soup = BeautifulSoup(self.driver.page_source, 'html.parser')
-                
-                # Extraer links de empresas con clase "result-item"
-                result_items = soup.find_all('a', class_='result-item')
+
+                # Guardar HTML para debug si está activado
+                if self.debug_save_html:
+                    try:
+                        self.debug_dir.mkdir(parents=True, exist_ok=True)
+                        fname = f"{niche}_page{page}_{int(time.time())}.html"
+                        fpath = self.debug_dir / fname
+                        with open(fpath, 'w', encoding='utf-8') as fh:
+                            fh.write(soup.prettify())
+                        self._debug_saved_files.append(str(fpath))
+                        logger.info(f"Guardado HTML debug: {fpath}")
+                    except Exception as e:
+                        logger.warning(f"No se pudo guardar HTML de debug: {e}")
+
+                # Intentar extracción por selector conocido
+                result_items = soup.find_all('a', class_='result-item') or []
+
+                # Fallback robusto: buscar anchors cuyo href coincida con patrón típico de empresa
+                if not result_items:
+                    anchors = soup.find_all('a', href=True)
+                    candidates = []
+                    # patrón: /colombia/.../nombre-empresa-<digitos> (NIT al final)
+                    pattern = re.compile(r'^/colombia/.+-\d{5,}$')
+                    for a in anchors:
+                        href = a.get('href', '')
+                        if pattern.search(href):
+                            candidates.append(a)
+                    result_items = candidates
+
+                # Fallback adicional: anchors que contienen un <h3 class="company-name"> o cualquier <h3>
+                if not result_items:
+                    anchors_h3 = []
+                    for a in soup.find_all('a', href=True):
+                        # Priorizar h3 con clase company-name
+                        if a.find('h3', class_='company-name'):
+                            anchors_h3.append(a)
+                            continue
+                        # Si contiene cualquier h3 con texto, considerarlo candidato
+                        h3 = a.find('h3')
+                        if h3 and h3.get_text(strip=True):
+                            anchors_h3.append(a)
+                    if anchors_h3:
+                        result_items = anchors_h3
+
+                # Fallback adicional: buscar contenedores tipo result/card/article que incluyan un anchor
+                if not result_items:
+                    container_candidates = []
+                    try:
+                        containers = soup.find_all(['div', 'article', 'section'], class_=re.compile('result|item|card|listing', re.I))
+                        for c in containers:
+                            a = c.find('a', href=True)
+                            if a:
+                                container_candidates.append(a)
+                    except Exception:
+                        container_candidates = []
+                    if container_candidates:
+                        result_items = container_candidates
+
+                # Último recurso: anchors que apunten a /colombia/ (sin requerir NIT numérico)
+                if not result_items:
+                    anchors_general = []
+                    for a in soup.find_all('a', href=True):
+                        href = a.get('href', '')
+                        if href.startswith('/colombia/'):
+                            anchors_general.append(a)
+                    result_items = anchors_general
+
                 logger.info(f"Encontradas {len(result_items)} empresas en página {page}")
-                
+
                 for item in result_items:
                     try:
+                        href = item.get('href', '')
+                        full_url = f"{self.BASE_URL}{href}" if href.startswith('/') else href
+                        if full_url in seen_urls:
+                            continue
                         company_data = self._parse_company_item(item)
                         if company_data:
                             all_companies.append(company_data)
+                            seen_urls.add(company_data.get('url'))
                     except Exception as e:
                         logger.error(f"Error parseando empresa: {e}")
                         continue
+
+                # Si se indicó que hay botón "mostrar más" intentar clics
+                if max_load_more > 0:
+                    clicked = 0
+                    for i in range(max_load_more):
+                        try:
+                            # Buscar botones comunes que cargan más resultados
+                            xpath_variants = [
+                                "//button[contains(normalize-space(.), 'Ver más resultados') ]",
+                                "//button[contains(normalize-space(.), 'Mostrar más') ]",
+                                "//button[contains(normalize-space(.), 'Cargar más') ]",
+                                "//button[contains(@class, 'load-more') or contains(@class, 'btn-more')]"
+                            ]
+                            btn = None
+                            for xp in xpath_variants:
+                                try:
+                                    btn = WebDriverWait(self.driver, 3).until(
+                                        EC.element_to_be_clickable((By.XPATH, xp))
+                                    )
+                                    if btn:
+                                        break
+                                except Exception:
+                                    btn = None
+                            if not btn:
+                                logger.info("No se encontró botón 'mostrar más' adicional")
+                                break
+
+                            # Click y esperar que cargue nuevos resultados
+                            try:
+                                btn.click()
+                            except Exception:
+                                # Fallback: usar JavaScript click
+                                try:
+                                    self.driver.execute_script("arguments[0].click();", btn)
+                                except Exception as e:
+                                    logger.debug(f"No se pudo clickear botón: {e}")
+                                    break
+
+                            time.sleep(2)
+                            # Reparsear HTML y extraer nuevos anchors
+                            soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+
+                            anchors = soup.find_all('a', href=True)
+                            new_candidates = []
+                            for a in anchors:
+                                href = a.get('href', '')
+                                full_url = f"{self.BASE_URL}{href}" if href.startswith('/') else href
+                                if full_url not in seen_urls:
+                                    # reuse earlier selection logic to pick candidate anchors
+                                    if a.find('h3', class_='company-name') or href.startswith('/colombia/'):
+                                        new_candidates.append(a)
+
+                            logger.info(f"Encontradas {len(new_candidates)} nuevas empresas tras click {i+1}")
+                            for item in new_candidates:
+                                try:
+                                    company_data = self._parse_company_item(item)
+                                    if company_data and company_data.get('url') not in seen_urls:
+                                        all_companies.append(company_data)
+                                        seen_urls.add(company_data.get('url'))
+                                except Exception as e:
+                                    logger.debug(f"Error parseando empresa post-click: {e}")
+
+                            clicked += 1
+                        except Exception as e:
+                            logger.debug(f"Error en bucle de 'load more': {e}")
+                            break
+
+                    logger.info(f"Clicks de 'mostrar más' realizados: {clicked}")
                 
                 # Respetar el servidor
                 time.sleep(1)
@@ -183,8 +312,18 @@ class EmpresasLaRepublicaScraper:
         except Exception as e:
             logger.error(f"Error en búsqueda: {e}")
         finally:
+            # Cerrar driver
             self._close_driver()
-        
+            # Borrar archivos debug guardados si corresponde
+            if self.debug_save_html and self._debug_saved_files:
+                for fp in self._debug_saved_files:
+                    try:
+                        if os.path.exists(fp):
+                            os.remove(fp)
+                            logger.info(f"Archivo debug eliminado: {fp}")
+                    except Exception as e:
+                        logger.debug(f"No se pudo eliminar archivo debug {fp}: {e}")
+
         logger.info(f"Total de empresas extraídas: {len(all_companies)}")
         return all_companies
     
@@ -241,7 +380,7 @@ class EmpresasLaRepublicaScraper:
                 "is_active": is_active,
                 "status": "Activa" if is_active else "Inactiva",
                 "company_size": self._estimate_company_size(status_text),
-                "search_niche": "",  # Se asigna en search_niche()
+                "search_niche": "",
                 "scraped_at": datetime.now().isoformat(),
                 "raw_html": str(item)
             }
@@ -341,39 +480,73 @@ class EmpresasLaRepublicaScraper:
         
         try:
             cur = conn.cursor()
-            
-            # Tabla de empresas scrapeadas
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS companies (
-                    id SERIAL PRIMARY KEY,
-                    name VARCHAR(500) NOT NULL,
-                    url VARCHAR(1000),
-                    rues VARCHAR(100),
-                    city VARCHAR(200),
-                    is_active BOOLEAN DEFAULT true,
-                    status VARCHAR(50),
-                    company_size VARCHAR(50),
-                    search_niche VARCHAR(200),
-                    scraped_at TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(url)
-                );
-            """)
-            
-            # Tabla de búsquedas realizadas
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS search_logs (
-                    id SERIAL PRIMARY KEY,
-                    niche VARCHAR(200) NOT NULL,
-                    total_companies INT,
-                    pages_scraped INT,
-                    started_at TIMESTAMP,
-                    completed_at TIMESTAMP,
-                    status VARCHAR(50)
-                );
-            """)
-            
+
+            # Detectar tipo de conexión para DDL compatible
+            is_sqlite = isinstance(conn, sqlite3.Connection)
+
+            if is_sqlite:
+                # SQLite-compatible DDL
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS companies (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL,
+                        url TEXT,
+                        rues TEXT,
+                        city TEXT,
+                        is_active INTEGER DEFAULT 1,
+                        status TEXT,
+                        company_size TEXT,
+                        search_niche TEXT,
+                        scraped_at TEXT,
+                        created_at TEXT DEFAULT (datetime('now')),
+                        updated_at TEXT DEFAULT (datetime('now')),
+                        UNIQUE(url)
+                    );
+                """)
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS search_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        niche TEXT NOT NULL,
+                        total_companies INTEGER,
+                        pages_scraped INTEGER,
+                        started_at TEXT,
+                        completed_at TEXT,
+                        status TEXT
+                    );
+                """)
+            else:
+                # PostgreSQL-compatible DDL
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS companies (
+                        id SERIAL PRIMARY KEY,
+                        name VARCHAR(500) NOT NULL,
+                        url VARCHAR(1000),
+                        rues VARCHAR(100),
+                        city VARCHAR(200),
+                        is_active BOOLEAN DEFAULT true,
+                        status VARCHAR(50),
+                        company_size VARCHAR(50),
+                        search_niche VARCHAR(200),
+                        scraped_at TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(url)
+                    );
+                """)
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS search_logs (
+                        id SERIAL PRIMARY KEY,
+                        niche VARCHAR(200) NOT NULL,
+                        total_companies INT,
+                        pages_scraped INT,
+                        started_at TIMESTAMP,
+                        completed_at TIMESTAMP,
+                        status VARCHAR(50)
+                    );
+                """)
+
             conn.commit()
             cur.close()
             logger.info("Tablas creadas/verificadas exitosamente")
@@ -528,13 +701,23 @@ class EmpresasLaRepublicaScraper:
         
         try:
             cur = conn.cursor()
-            cur.execute("""
-                SELECT id, name, url, rues, city, is_active, status, company_size, scraped_at
-                FROM companies
-                WHERE search_niche = %s
-                ORDER BY scraped_at DESC
-                LIMIT 1000;
-            """, (niche,))
+            is_sqlite = isinstance(conn, sqlite3.Connection)
+            if is_sqlite:
+                cur.execute("""
+                    SELECT id, name, url, rues, city, is_active, status, company_size, scraped_at
+                    FROM companies
+                    WHERE search_niche = ?
+                    ORDER BY scraped_at DESC
+                    LIMIT 1000;
+                """, (niche,))
+            else:
+                cur.execute("""
+                    SELECT id, name, url, rues, city, is_active, status, company_size, scraped_at
+                    FROM companies
+                    WHERE search_niche = %s
+                    ORDER BY scraped_at DESC
+                    LIMIT 1000;
+                """, (niche,))
             
             columns = [desc[0] for desc in cur.description]
             results = [dict(zip(columns, row)) for row in cur.fetchall()]
@@ -549,7 +732,7 @@ class EmpresasLaRepublicaScraper:
         finally:
             conn.close()
     
-    def scrape_and_save(self, niche: str, pages: int = 1) -> Dict[str, Any]:
+    def scrape_and_save(self, niche: str, pages: int = 1, max_load_more: int = 0) -> Dict[str, Any]:
         """
         Pipeline completo: scrape, parse y guarda en base de datos
         
@@ -565,8 +748,8 @@ class EmpresasLaRepublicaScraper:
         # Crear tablas si no existen
         self.create_tables()
         
-        # Buscar empresas
-        companies = self.search_niche(niche, pages)
+        # Buscar empresas (soporta botón 'mostrar más' con max_load_more)
+        companies = self.search_niche(niche, pages, max_load_more=max_load_more)
         
         if not companies:
             logger.warning(f"No se encontraron empresas para {niche}")
@@ -613,6 +796,7 @@ if __name__ == "__main__":
     # Ejemplo de uso
     niche = sys.argv[1] if len(sys.argv) > 1 else "veterinarias"
     pages = int(sys.argv[2]) if len(sys.argv) > 2 else 1
-    
-    result = scraper.scrape_and_save(niche, pages)
+    max_load_more = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+
+    result = scraper.scrape_and_save(niche, pages, max_load_more=max_load_more)
     print(f"\n✅ Resultado: {result}")
